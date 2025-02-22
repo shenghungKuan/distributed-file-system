@@ -1,0 +1,122 @@
+syntax = "proto3";
+package dfs;
+
+option go_package = "github.com/marcus/distributed-file-system/proto";
+
+// Heartbeat message sent from storage nodes to controller
+message Heartbeat {
+  string node_id = 1;
+  string address = 2;
+  uint64 free_space = 3;
+  uint64 total_requests = 4;
+  repeated string stored_files = 5;
+}
+
+// File chunk information
+message ChunkInfo {
+  string chunk_id = 1;
+  uint32 index = 2;
+  uint64 size = 3;
+  bytes checksum = 4;
+}
+
+// Storage request from client to controller
+message StoreRequest {
+  string filename = 1;
+  uint64 total_size = 2;
+  uint32 chunk_size = 3;
+  uint32 num_chunks = 4;
+}
+
+// Storage response from controller to client
+message StoreResponse {
+  repeated ChunkPlacement chunk_placements = 1;
+}
+
+// Chunk placement information
+message ChunkPlacement {
+  string chunk_id = 1;
+  uint32 chunk_index = 2;
+  repeated string storage_nodes = 3; // Primary node first, then replicas
+}
+
+// Retrieve request from client to controller
+message RetrieveRequest {
+  string filename = 1;
+}
+
+// Retrieve response from controller to client
+message RetrieveResponse {
+  repeated ChunkPlacement chunk_placements = 1;
+  uint64 total_size = 2;
+  uint32 chunk_size = 3;
+}
+
+// Delete request from client to controller
+message DeleteRequest {
+  string filename = 1;
+}
+
+// Delete response from controller to client
+message DeleteResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// List files request from client to controller
+message ListRequest {}
+
+// List files response from controller to client
+message ListResponse {
+  repeated FileInfo files = 1;
+}
+
+// File information
+message FileInfo {
+  string filename = 1;
+  uint64 size = 2;
+  uint32 num_chunks = 3;
+}
+
+// Node status request from client to controller
+message NodeStatusRequest {}
+
+// Node status response from controller to client
+message NodeStatusResponse {
+  repeated NodeInfo nodes = 1;
+  uint64 total_space = 2;
+}
+
+// Node information
+message NodeInfo {
+  string node_id = 1;
+  string address = 2;
+  uint64 free_space = 3;
+  uint64 total_requests = 4;
+}
+
+// Chunk storage request from client to storage node
+message ChunkStoreRequest {
+  string chunk_id = 1;
+  uint32 chunk_index = 2;
+  bytes data = 3;
+  repeated string replica_nodes = 4;
+}
+
+// Chunk storage response from storage node
+message ChunkStoreResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Chunk retrieve request to storage node
+message ChunkRetrieveRequest {
+  string chunk_id = 1;
+}
+
+// Chunk retrieve response from storage node
+message ChunkRetrieveResponse {
+  bytes data = 1;
+  bytes checksum = 2;
+  bool corrupted = 3;
+}
