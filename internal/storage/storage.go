@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"golang.org/x/sys/unix"
 
 	pb "github.com/marcus/distributed-file-system/proto"
 	"github.com/google/uuid"
@@ -23,16 +24,21 @@ type StorageNode struct {
 	storageDir    string
 	nodeID        string
 
-	listener     net.Listener
+	listener      net.Listener
 	controllerConn net.Conn
 
 	totalRequests uint64
-	mu           sync.RWMutex
+	mu            sync.RWMutex
 
-	shutdown     chan struct{}
+	shutdown      chan struct{}
 }
 
 func NewStorageNode(controllerAddr string, port int, storageDir string) (*StorageNode, error) {
+	// Create storage directory if it doesn't exist
+	if err := os.MkdirAll(storageDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create storage directory: %v", err)
+	}
+
 	return &StorageNode{
 		controllerAddr: controllerAddr,
 		port:          port,
@@ -154,7 +160,7 @@ func (s *StorageNode) handleConnection(conn net.Conn) {
 
 	// Read message size
 	sizeBuf := make([]byte, 4)
-	if _, err := conn.Read(sizeBuf); err != nil {
+	if _, err := io.ReadFull(conn, sizeBuf); err != nil {
 		log.Printf("Error reading message size: %v", err)
 		return
 	}
@@ -162,7 +168,7 @@ func (s *StorageNode) handleConnection(conn net.Conn) {
 
 	// Read message
 	msgBuf := make([]byte, size)
-	if _, err := conn.Read(msgBuf); err != nil {
+	if _, err := io.ReadFull(conn, msgBuf); err != nil {
 		log.Printf("Error reading message: %v", err)
 		return
 	}
@@ -171,7 +177,174 @@ func (s *StorageNode) handleConnection(conn net.Conn) {
 	s.totalRequests++
 	s.mu.Unlock()
 
-	// TODO: Implement message type detection and handling
+	// Try to unmarshal as different message types
+	if req := &pb.ChunkStoreRequest{}; proto.Unmarshal(msgBuf, req) == nil {
+		resp := s.handleChunkStore(req)
+		s.sendResponse(conn, resp)
+		return
+	}
+
+	if req := &pb.ChunkRetrieveRequest{}; proto.Unmarshal(msgBuf, req) == nil {
+		resp := s.handleChunkRetrieve(req)
+		s.sendResponse(conn, resp)
+		return
+	}
+
+	if req := &pb.ChunkDeleteRequest{}; proto.Unmarshal(msgBuf, req) == nil {
+		resp := s.handleChunkDelete(req)
+		s.sendResponse(conn, resp)
+		return
+	}
+
+	log.Printf("Unknown message type received")
+}
+
+func (s *StorageNode) sendResponse(conn net.Conn, msg proto.Message) {
+	msgBytes, err := proto.Marshal(msg)
+	if err != nil {
+		log.Printf("Error marshaling response: %v", err)
+		return
+	}
+
+	// Send message size
+	sizeBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(sizeBuf, uint32(len(msgBytes)))
+	if _, err := conn.Write(sizeBuf); err != nil {
+		log.Printf("Error sending response size: %v", err)
+		return
+	}
+
+	// Send message
+	if _, err := conn.Write(msgBytes); err != nil {
+		log.Printf("Error sending response: %v", err)
+		return
+	}
+}
+
+func (s *StorageNode) handleChunkStore(req *pb.ChunkStoreRequest) *pb.ChunkStoreResponse {
+	// Store the chunk locally
+	if err := s.storeChunk(req.ChunkId, req.Data); err != nil {
+		return &pb.ChunkStoreResponse{
+			Success: false,
+			Error:   err.Error(),
+		}
+	}
+
+	// Forward to replica nodes if any
+	for _, nodeAddr := range req.ReplicaNodes {
+		if err := s.forwardChunk(nodeAddr, req); err != nil {
+			log.Printf("Failed to forward chunk to %s: %v", nodeAddr, err)
+		}
+	}
+
+	return &pb.ChunkStoreResponse{
+		Success: true,
+	}
+}
+
+func (s *StorageNode) handleChunkRetrieve(req *pb.ChunkRetrieveRequest) *pb.ChunkRetrieveResponse {
+	data, checksum, err := s.retrieveChunk(req.ChunkId)
+	if err != nil {
+		return &pb.ChunkRetrieveResponse{
+			Corrupted: true,
+			Error:     err.Error(),
+		}
+	}
+
+	return &pb.ChunkRetrieveResponse{
+		Data:      data,
+		Checksum:  checksum,
+		Corrupted: false,
+	}
+}
+
+func (s *StorageNode) handleChunkDelete(req *pb.ChunkDeleteRequest) *pb.ChunkDeleteResponse {
+	path := filepath.Join(s.storageDir, req.ChunkId)
+	if err := os.Remove(path); err != nil {
+		return &pb.ChunkDeleteResponse{
+			Success: false,
+			Error:   err.Error(),
+		}
+	}
+
+	return &pb.ChunkDeleteResponse{
+		Success: true,
+	}
+}
+
+func (s *StorageNode) forwardChunk(nodeAddr string, req *pb.ChunkStoreRequest) error {
+	// Remove the current node from replica list to prevent infinite forwarding
+	replicaNodes := make([]string, 0)
+	for _, addr := range req.ReplicaNodes {
+		if addr != nodeAddr {
+			replicaNodes = append(replicaNodes, addr)
+		}
+	}
+
+	forwardReq := &pb.ChunkStoreRequest{
+		ChunkId:      req.ChunkId,
+		ChunkIndex:   req.ChunkIndex,
+		Data:         req.Data,
+		ReplicaNodes: replicaNodes,
+	}
+
+	// Connect to replica node
+	conn, err := net.Dial("tcp", nodeAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to replica node: %v", err)
+	}
+	defer conn.Close()
+
+	// Send request
+	msgBytes, err := proto.Marshal(forwardReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal forward request: %v", err)
+	}
+
+	// Send message size
+	sizeBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(sizeBuf, uint32(len(msgBytes)))
+	if _, err := conn.Write(sizeBuf); err != nil {
+		return fmt.Errorf("failed to send forward request size: %v", err)
+	}
+
+	// Send message
+	if _, err := conn.Write(msgBytes); err != nil {
+		return fmt.Errorf("failed to send forward request: %v", err)
+	}
+
+	// Read response
+	resp := &pb.ChunkStoreResponse{}
+	if err := s.receiveMessage(conn, resp); err != nil {
+		return fmt.Errorf("failed to receive forward response: %v", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("forward failed: %s", resp.Error)
+	}
+
+	return nil
+}
+
+func (s *StorageNode) receiveMessage(conn net.Conn, msg proto.Message) error {
+	// Read message size
+	sizeBuf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, sizeBuf); err != nil {
+		return fmt.Errorf("failed to read message size: %v", err)
+	}
+	size := binary.BigEndian.Uint32(sizeBuf)
+
+	// Read message
+	msgBuf := make([]byte, size)
+	if _, err := io.ReadFull(conn, msgBuf); err != nil {
+		return fmt.Errorf("failed to read message: %v", err)
+	}
+
+	if err := proto.Unmarshal(msgBuf, msg); err != nil {
+		return fmt.Errorf("failed to unmarshal message: %v", err)
+	}
+
+	return nil
 }
 
 func (s *StorageNode) storeChunk(chunkID string, data []byte) error {
@@ -232,6 +405,10 @@ func (s *StorageNode) retrieveChunk(chunkID string) ([]byte, []byte, error) {
 }
 
 func (s *StorageNode) getFreeSpace() uint64 {
-	// TODO: Implement actual disk space checking
-	return 1024 * 1024 * 1024 * 100 // Return 100GB for now
+	var stat unix.Statfs_t
+	if err := unix.Statfs(s.storageDir, &stat); err != nil {
+		log.Printf("Error getting disk space: %v", err)
+		return 0
+	}
+	return stat.Bavail * uint64(stat.Bsize)
 }
