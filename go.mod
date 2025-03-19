@@ -1,8 +1,3 @@
-module github.com/shenghungKuan/distributed-file-system
+module dfs
 
-go 1.21
-
-require (
-	github.com/google/uuid v1.6.0
-	google.golang.org/protobuf v1.32.0
-)
+go 1.24.0
