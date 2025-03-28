@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shenghungKuan/distributed-file-system/internal/client"
 )
 
 func printUsage() {

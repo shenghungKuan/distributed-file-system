@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/shenghungKuan/distributed-file-system/internal/storage"
 )
 
 func main() {

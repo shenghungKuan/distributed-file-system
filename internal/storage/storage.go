@@ -13,7 +13,6 @@ import (
 	"time"
 	"golang.org/x/sys/unix"
 
-	pb "github.com/shenghungKuan/distributed-file-system/proto"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )

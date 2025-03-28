@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/shenghungKuan/distributed-file-system/internal/controller"
+	"dfs/internal/controller"
 )
 
 func main() {
