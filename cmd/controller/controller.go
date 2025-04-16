@@ -1,4 +1,4 @@
-package controller
+package main
 
 import (
 	"encoding/binary"
@@ -8,13 +8,15 @@ import (
 	"sync"
 	"time"
 
+	pb "dfs/proto"
+
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
 	heartbeatTimeout = 15 * time.Second
-	minReplicas     = 3
+	minReplicas      = 3
 )
 
 type nodeInfo struct {
@@ -101,37 +103,38 @@ func (c *Controller) handleConnection(conn net.Conn) {
 	}
 
 	// Try to unmarshal as different message types
-	if heartbeat := &pb.Heartbeat{}; proto.Unmarshal(msgBuf, heartbeat) == nil {
+	heartbeat := &pb.Heartbeat{}
+	if proto.Unmarshal(msgBuf, heartbeat) == nil {
 		c.handleHeartbeat(heartbeat)
 		return
 	}
-
-	if req := &pb.StoreRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := c.handleStoreRequest(req)
+	storeReq := &pb.StoreRequest{}
+	if proto.Unmarshal(msgBuf, storeReq) == nil {
+		resp := c.handleStoreRequest(storeReq)
 		c.sendResponse(conn, resp)
 		return
 	}
-
-	if req := &pb.RetrieveRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := c.handleRetrieveRequest(req)
+	retrieveReq := &pb.RetrieveRequest{}
+	if proto.Unmarshal(msgBuf, retrieveReq) == nil {
+		resp := c.handleRetrieveRequest(retrieveReq)
 		c.sendResponse(conn, resp)
 		return
 	}
-
-	if req := &pb.DeleteRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := c.handleDeleteRequest(req)
+	deleteReq := &pb.DeleteRequest{}
+	if proto.Unmarshal(msgBuf, deleteReq) == nil {
+		resp := c.handleDeleteRequest(deleteReq)
 		c.sendResponse(conn, resp)
 		return
 	}
-
-	if req := &pb.ListRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := c.handleListRequest(req)
+	listReq := &pb.ListRequest{}
+	if proto.Unmarshal(msgBuf, listReq) == nil {
+		resp := c.handleListRequest(listReq)
 		c.sendResponse(conn, resp)
 		return
 	}
-
-	if req := &pb.NodeStatusRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := c.handleNodeStatusRequest(req)
+	statusReq := &pb.NodeStatusRequest{}
+	if proto.Unmarshal(msgBuf, statusReq) == nil {
+		resp := c.handleNodeStatusRequest(statusReq)
 		c.sendResponse(conn, resp)
 		return
 	}
@@ -191,16 +194,18 @@ func (c *Controller) handleStoreRequest(req *pb.StoreRequest) *pb.StoreResponse 
 
 	// Check if file already exists
 	if _, exists := c.files[req.Filename]; exists {
+		// Since StoreResponse doesn't have an error field, we just return empty placements
 		return &pb.StoreResponse{
-			Error: fmt.Sprintf("file %s already exists", req.Filename),
+			ChunkPlacements: nil,
 		}
 	}
 
 	// Select storage nodes for chunks
 	placements, err := c.selectStorageNodes(req.NumChunks, uint64(req.ChunkSize))
 	if err != nil {
+		// Since StoreResponse doesn't have an error field, we just return empty placements
 		return &pb.StoreResponse{
-			Error: err.Error(),
+			ChunkPlacements: nil,
 		}
 	}
 
@@ -235,8 +240,11 @@ func (c *Controller) handleRetrieveRequest(req *pb.RetrieveRequest) *pb.Retrieve
 
 	file, exists := c.files[req.Filename]
 	if !exists {
+		// Since RetrieveResponse doesn't have an error field, we just return empty response
 		return &pb.RetrieveResponse{
-			Error: fmt.Sprintf("file %s not found", req.Filename),
+			ChunkPlacements: nil,
+			TotalSize:       0,
+			ChunkSize:       0,
 		}
 	}
 
@@ -292,7 +300,7 @@ func (c *Controller) handleListRequest(req *pb.ListRequest) *pb.ListResponse {
 	for _, file := range c.files {
 		files = append(files, &pb.FileInfo{
 			Filename:  file.name,
-			Size:     file.size,
+			Size:      file.size,
 			NumChunks: file.numChunks,
 		})
 	}
@@ -332,7 +340,7 @@ func (c *Controller) checkHeartbeats() {
 		case <-ticker.C:
 			c.mu.Lock()
 			now := time.Now()
-			
+
 			// Check for dead nodes
 			for id, node := range c.nodes {
 				if now.Sub(node.lastHeartbeat) > heartbeatTimeout {
@@ -400,10 +408,10 @@ func (c *Controller) selectStorageNodes(numChunks uint32, chunkSize uint64) ([]*
 		for id, node := range c.nodes {
 			// Score based on free space (normalized to 0-1)
 			spaceScore := float64(node.freeSpace) / float64(1024*1024*1024*1000) // Normalize to 1TB
-			
+
 			// Score based on load (inverse of total requests, normalized to 0-1)
 			loadScore := 1.0 / (1.0 + float64(node.totalRequests)/1000.0)
-			
+
 			// Combined score (you can adjust weights as needed)
 			nodeScores[id] = 0.7*spaceScore + 0.3*loadScore
 		}

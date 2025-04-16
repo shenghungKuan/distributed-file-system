@@ -8,8 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-
-	"dfs/internal/controller"
 )
 
 func main() {
@@ -18,7 +16,7 @@ func main() {
 	flag.Parse()
 
 	// Create and start controller
-	ctrl, err := controller.NewController(*port)
+	ctrl, err := NewController(*port)
 	if err != nil {
 		log.Fatalf("Failed to create controller: %v", err)
 	}
