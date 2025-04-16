@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-
 )
 
 func main() {
@@ -21,18 +20,18 @@ func main() {
 		log.Fatal("Storage directory (-dir) must be specified")
 	}
 
-	// Create storage directory if it doesn't exist
-	storageDir, err := filepath.Abs(*storageDir)
+	// Get absolute path of storage directory
+	absStorageDir, err := filepath.Abs(*storageDir)
 	if err != nil {
 		log.Fatalf("Failed to get absolute path: %v", err)
 	}
-	
-	if err := os.MkdirAll(storageDir, 0755); err != nil {
+
+	if err := os.MkdirAll(absStorageDir, 0755); err != nil {
 		log.Fatalf("Failed to create storage directory: %v", err)
 	}
 
 	// Create and start storage node
-	node, err := storage.NewStorageNode(*controllerAddr, *port, storageDir)
+	node, err := NewStorageNode(*controllerAddr, *port, absStorageDir)
 	if err != nil {
 		log.Fatalf("Failed to create storage node: %v", err)
 	}
@@ -42,7 +41,7 @@ func main() {
 		log.Fatalf("Failed to start storage node: %v", err)
 	}
 
-	log.Printf("Storage node started. Listening on port %d, storing chunks in %s", *port, storageDir)
+	log.Printf("Storage node started. Listening on port %d, storing chunks in %s", *port, absStorageDir)
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)

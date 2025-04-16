@@ -1,4 +1,4 @@
-package storage
+package main
 
 import (
 	"crypto/sha256"
@@ -11,7 +11,10 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
 	"golang.org/x/sys/unix"
+
+	pb "dfs/proto"
 
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -19,17 +22,17 @@ import (
 
 type StorageNode struct {
 	controllerAddr string
-	port          int
-	storageDir    string
-	nodeID        string
+	port           int
+	storageDir     string
+	nodeID         string
 
-	listener      net.Listener
+	listener       net.Listener
 	controllerConn net.Conn
 
 	totalRequests uint64
 	mu            sync.RWMutex
 
-	shutdown      chan struct{}
+	shutdown chan struct{}
 }
 
 func NewStorageNode(controllerAddr string, port int, storageDir string) (*StorageNode, error) {
@@ -40,10 +43,10 @@ func NewStorageNode(controllerAddr string, port int, storageDir string) (*Storag
 
 	return &StorageNode{
 		controllerAddr: controllerAddr,
-		port:          port,
-		storageDir:    storageDir,
-		nodeID:        uuid.New().String(),
-		shutdown:      make(chan struct{}),
+		port:           port,
+		storageDir:     storageDir,
+		nodeID:         uuid.New().String(),
+		shutdown:       make(chan struct{}),
 	}, nil
 }
 
@@ -80,6 +83,15 @@ func (s *StorageNode) Shutdown() {
 }
 
 func (s *StorageNode) connectToController() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Close existing connection if any
+	if s.controllerConn != nil {
+		s.controllerConn.Close()
+		s.controllerConn = nil
+	}
+
 	conn, err := net.Dial("tcp", s.controllerAddr)
 	if err != nil {
 		return err
@@ -110,6 +122,11 @@ func (s *StorageNode) sendHeartbeats() {
 
 func (s *StorageNode) sendHeartbeat() error {
 	s.mu.RLock()
+	if s.controllerConn == nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("no connection to controller")
+	}
+
 	heartbeat := &pb.Heartbeat{
 		NodeId:        s.nodeID,
 		Address:       fmt.Sprintf(":%d", s.port),
@@ -123,16 +140,38 @@ func (s *StorageNode) sendHeartbeat() error {
 		return fmt.Errorf("failed to marshal heartbeat: %v", err)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check connection again after acquiring write lock
+	if s.controllerConn == nil {
+		return fmt.Errorf("connection lost while preparing heartbeat")
+	}
+
+	// Set write deadline to prevent blocking forever
+	if err := s.controllerConn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return fmt.Errorf("failed to set write deadline: %v", err)
+	}
+
 	// Send message size first
 	sizeBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(sizeBuf, uint32(len(msgBytes)))
 	if _, err := s.controllerConn.Write(sizeBuf); err != nil {
+		s.controllerConn.Close()
+		s.controllerConn = nil
 		return fmt.Errorf("failed to send message size: %v", err)
 	}
 
 	// Send message
 	if _, err := s.controllerConn.Write(msgBytes); err != nil {
+		s.controllerConn.Close()
+		s.controllerConn = nil
 		return fmt.Errorf("failed to send message: %v", err)
+	}
+
+	// Reset write deadline
+	if err := s.controllerConn.SetWriteDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("failed to reset write deadline: %v", err)
 	}
 
 	return nil
@@ -177,20 +216,23 @@ func (s *StorageNode) handleConnection(conn net.Conn) {
 	s.mu.Unlock()
 
 	// Try to unmarshal as different message types
-	if req := &pb.ChunkStoreRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := s.handleChunkStore(req)
+	storeReq := &pb.ChunkStoreRequest{}
+	if proto.Unmarshal(msgBuf, storeReq) == nil {
+		resp := s.handleChunkStore(storeReq)
 		s.sendResponse(conn, resp)
 		return
 	}
 
-	if req := &pb.ChunkRetrieveRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := s.handleChunkRetrieve(req)
+	retrieveReq := &pb.ChunkRetrieveRequest{}
+	if proto.Unmarshal(msgBuf, retrieveReq) == nil {
+		resp := s.handleChunkRetrieve(retrieveReq)
 		s.sendResponse(conn, resp)
 		return
 	}
 
-	if req := &pb.ChunkDeleteRequest{}; proto.Unmarshal(msgBuf, req) == nil {
-		resp := s.handleChunkDelete(req)
+	deleteReq := &pb.DeleteRequest{}
+	if proto.Unmarshal(msgBuf, deleteReq) == nil {
+		resp := s.handleChunkDelete(deleteReq)
 		s.sendResponse(conn, resp)
 		return
 	}
@@ -244,9 +286,10 @@ func (s *StorageNode) handleChunkStore(req *pb.ChunkStoreRequest) *pb.ChunkStore
 func (s *StorageNode) handleChunkRetrieve(req *pb.ChunkRetrieveRequest) *pb.ChunkRetrieveResponse {
 	data, checksum, err := s.retrieveChunk(req.ChunkId)
 	if err != nil {
+		// Since ChunkRetrieveResponse doesn't have an error field,
+		// we just return corrupted data
 		return &pb.ChunkRetrieveResponse{
 			Corrupted: true,
-			Error:     err.Error(),
 		}
 	}
 
@@ -257,16 +300,17 @@ func (s *StorageNode) handleChunkRetrieve(req *pb.ChunkRetrieveRequest) *pb.Chun
 	}
 }
 
-func (s *StorageNode) handleChunkDelete(req *pb.ChunkDeleteRequest) *pb.ChunkDeleteResponse {
-	path := filepath.Join(s.storageDir, req.ChunkId)
+func (s *StorageNode) handleChunkDelete(req *pb.DeleteRequest) *pb.DeleteResponse {
+	// For delete requests, the filename is the chunk ID
+	path := filepath.Join(s.storageDir, req.Filename)
 	if err := os.Remove(path); err != nil {
-		return &pb.ChunkDeleteResponse{
+		return &pb.DeleteResponse{
 			Success: false,
 			Error:   err.Error(),
 		}
 	}
 
-	return &pb.ChunkDeleteResponse{
+	return &pb.DeleteResponse{
 		Success: true,
 	}
 }
@@ -348,10 +392,10 @@ func (s *StorageNode) receiveMessage(conn net.Conn, msg proto.Message) error {
 
 func (s *StorageNode) storeChunk(chunkID string, data []byte) error {
 	path := filepath.Join(s.storageDir, chunkID)
-	
+
 	// Calculate checksum
 	checksum := sha256.Sum256(data)
-	
+
 	// Create chunk file
 	file, err := os.Create(path)
 	if err != nil {
@@ -374,7 +418,7 @@ func (s *StorageNode) storeChunk(chunkID string, data []byte) error {
 
 func (s *StorageNode) retrieveChunk(chunkID string) ([]byte, []byte, error) {
 	path := filepath.Join(s.storageDir, chunkID)
-	
+
 	// Open chunk file
 	file, err := os.Open(path)
 	if err != nil {
