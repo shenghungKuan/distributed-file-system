@@ -8,7 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
 )
 
 func printUsage() {
@@ -28,7 +27,7 @@ func main() {
 	flag.Parse()
 
 	// Create client
-	c, err := client.NewClient(*controllerAddr)
+	c, err := NewClient(*controllerAddr)
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
@@ -105,7 +104,7 @@ func main() {
 			}
 			fmt.Println("Stored files:")
 			for _, file := range files {
-				fmt.Printf("  %s (%d bytes, %d chunks)\n", 
+				fmt.Printf("  %s (%d bytes, %d chunks)\n",
 					file.Name, file.Size, file.NumChunks)
 			}
 

@@ -1,7 +1,6 @@
-package client
+package main
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -9,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	pb "dfs/proto"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -367,7 +368,7 @@ func (c *Client) requestFileRetrieval(filename string) (*pb.RetrieveResponse, er
 
 func (c *Client) storeChunk(placement *pb.ChunkPlacement, data []byte) error {
 	// Calculate checksum
-	checksum := sha256.Sum256(data)
+	// checksum := sha256.Sum256(data)
 
 	// Create store request
 	req := &pb.ChunkStoreRequest{
