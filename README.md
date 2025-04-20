@@ -59,28 +59,35 @@ A distributed file system (DFS) implementation in Go that supports parallel stor
    protoc -I=. --go_out=. ./proto/dfs.proto
    ```
 
+5. Build the binary for each:
+   ```bash
+   cd cmd/storage && go build -o ../../bin/storage  
+   cd cmd/controller && go build -o ../../bin/controller  
+   cd cmd/client && go build -o ../../bin/client  
+   ```
+
 ## Running
 
 1. Start the controller:
    ```bash
-   go run ./cmd/controller/main.go -port 8080
+   ./bin/controller [-port 8080]
    ```
 
 2. Start multiple storage nodes:
    ```bash
    # Storage node 1
-   go run ./cmd/storage/main.go -controller localhost:8080 -port 8081 -dir /tmp/dfs/node1  
+   ./bin/storage [-controller localhost:8080] -port 8081 -dir data/node1  
    
    # Storage node 2
-   go run ./cmd/storage/main.go -controller localhost:8080 -port 8082 -dir /tmp/dfs/node2
+   ./bin/storage [-controller localhost:8080] -port 8082 -dir data/node2  
    
    # Storage node 3
-   go run ./cmd/storage/main.go localhost:8080 -port 8083 -dir /tmp/dfs/node3
+   ./bin/storage [-controller localhost:8080] -port 8083 -dir data/node3  
    ```
 
 3. Run the client:
    ```bash
-   .go run ./cmd/client/main.go -controller localhost:8080
+   ./bin/client [-controller localhost:8080]
    ```
 
 ## Client Commands
