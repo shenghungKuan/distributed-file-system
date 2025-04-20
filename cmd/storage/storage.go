@@ -86,16 +86,38 @@ func (s *StorageNode) connectToController() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log.Printf("Attempting to connect to controller at %s", s.controllerAddr)
+
 	// Close existing connection if any
 	if s.controllerConn != nil {
+		log.Printf("Closing existing controller connection")
 		s.controllerConn.Close()
 		s.controllerConn = nil
 	}
 
-	conn, err := net.Dial("tcp", s.controllerAddr)
-	if err != nil {
-		return err
+	// Create connection with keepalive
+	dialer := net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
 	}
+
+	conn, err := dialer.Dial("tcp", s.controllerAddr)
+	if err != nil {
+		return fmt.Errorf("dial failed: %v", err)
+	}
+
+	// Enable TCP keepalive
+	tcpConn := conn.(*net.TCPConn)
+	if err := tcpConn.SetKeepAlive(true); err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to enable keepalive: %v", err)
+	}
+	if err := tcpConn.SetKeepAlivePeriod(30 * time.Second); err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to set keepalive period: %v", err)
+	}
+
+	log.Printf("Successfully connected to controller")
 	s.controllerConn = conn
 	return nil
 }
@@ -121,9 +143,10 @@ func (s *StorageNode) sendHeartbeats() {
 }
 
 func (s *StorageNode) sendHeartbeat() error {
-	s.mu.RLock()
+	s.mu.Lock() // Use full lock to prevent connection changes during send
+	defer s.mu.Unlock()
+
 	if s.controllerConn == nil {
-		s.mu.RUnlock()
 		return fmt.Errorf("no connection to controller")
 	}
 
@@ -133,37 +156,38 @@ func (s *StorageNode) sendHeartbeat() error {
 		FreeSpace:     s.getFreeSpace(),
 		TotalRequests: s.totalRequests,
 	}
-	s.mu.RUnlock()
 
 	msgBytes, err := proto.Marshal(heartbeat)
 	if err != nil {
 		return fmt.Errorf("failed to marshal heartbeat: %v", err)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Check connection again after acquiring write lock
-	if s.controllerConn == nil {
-		return fmt.Errorf("connection lost while preparing heartbeat")
-	}
-
-	// Set write deadline to prevent blocking forever
-	if err := s.controllerConn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	// Set longer write deadline for the entire operation
+	if err := s.controllerConn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		log.Printf("Failed to set write deadline: %v", err)
+		s.controllerConn.Close()
+		s.controllerConn = nil
 		return fmt.Errorf("failed to set write deadline: %v", err)
 	}
 
 	// Send message size first
 	sizeBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(sizeBuf, uint32(len(msgBytes)))
+
+	log.Printf("Sending heartbeat size: %d bytes", len(msgBytes))
 	if _, err := s.controllerConn.Write(sizeBuf); err != nil {
+		log.Printf("Failed to send message size: %v", err)
 		s.controllerConn.Close()
 		s.controllerConn = nil
 		return fmt.Errorf("failed to send message size: %v", err)
 	}
 
-	// Send message
+	// Send message with a small delay to prevent overwhelming the receiver
+	time.Sleep(10 * time.Millisecond)
+
+	log.Printf("Sending heartbeat message")
 	if _, err := s.controllerConn.Write(msgBytes); err != nil {
+		log.Printf("Failed to send message: %v", err)
 		s.controllerConn.Close()
 		s.controllerConn = nil
 		return fmt.Errorf("failed to send message: %v", err)
@@ -171,9 +195,11 @@ func (s *StorageNode) sendHeartbeat() error {
 
 	// Reset write deadline
 	if err := s.controllerConn.SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("Failed to reset write deadline: %v", err)
 		return fmt.Errorf("failed to reset write deadline: %v", err)
 	}
 
+	log.Printf("Successfully sent heartbeat")
 	return nil
 }
 
