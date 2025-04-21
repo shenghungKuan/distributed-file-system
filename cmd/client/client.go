@@ -210,7 +210,9 @@ func (c *Client) ListFiles() ([]FileInfo, error) {
 	defer conn.Close()
 
 	// Send list request
-	req := &pb.ListRequest{}
+	req := &pb.ListRequest{
+		ListRequest: true,
+	}
 	if err := c.sendMessage(conn, req); err != nil {
 		return nil, fmt.Errorf("failed to send list request: %v", err)
 	}
@@ -242,7 +244,9 @@ func (c *Client) ListNodes() ([]NodeInfo, error) {
 	defer conn.Close()
 
 	// Send node status request
-	req := &pb.NodeStatusRequest{}
+	req := &pb.NodeStatusRequest{
+		NodeStatus: true,
+	}
 	if err := c.sendMessage(conn, req); err != nil {
 		return nil, fmt.Errorf("failed to send node status request: %v", err)
 	}

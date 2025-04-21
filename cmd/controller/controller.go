@@ -29,11 +29,11 @@ type nodeInfo struct {
 }
 
 type chunkInfo struct {
-	id       string
-	index    uint32
-	size     uint64
-	nodes    []string // Primary node first, then replicas
-	checksum []byte
+	id    string
+	index uint32
+	size  uint64
+	nodes []string // Primary node first, then replicas
+	// checksum []byte
 }
 
 type fileInfo struct {
@@ -50,15 +50,19 @@ type Controller struct {
 	nodes map[string]*nodeInfo // node ID -> node info
 	files map[string]*fileInfo // filename -> file info
 
+	storageConns map[string]net.Conn // node ID -> persistent connection
+	connMu       sync.RWMutex        // separate mutex for connection management
+
 	shutdown chan struct{}
 }
 
 func NewController(port int) (*Controller, error) {
 	return &Controller{
-		port:     port,
-		nodes:    make(map[string]*nodeInfo),
-		files:    make(map[string]*fileInfo),
-		shutdown: make(chan struct{}),
+		port:         port,
+		nodes:        make(map[string]*nodeInfo),
+		files:        make(map[string]*fileInfo),
+		storageConns: make(map[string]net.Conn),
+		shutdown:     make(chan struct{}),
 	}, nil
 }
 
@@ -75,71 +79,215 @@ func (c *Controller) Start(listener net.Listener) {
 				log.Printf("Error accepting connection: %v", err)
 				continue
 			}
-			go c.handleConnection(conn)
+
+			// Read first message to determine connection type
+			msgType, msgBuf, err := c.readMessage(conn)
+			if err != nil {
+				log.Printf("Error reading initial message: %v", err)
+				conn.Close()
+				continue
+			}
+
+			if msgType == "heartbeat" {
+				// Storage node connection
+				log.Printf("Storage node connected from %s", conn.RemoteAddr())
+				go c.handleStorageNodeConnection(conn, msgBuf)
+			} else {
+				// Client connection
+				log.Printf("Client connected from %s", conn.RemoteAddr())
+				go c.handleClientConnection(conn, msgType, msgBuf)
+			}
 		}
 	}
 }
 
 func (c *Controller) Shutdown() {
 	close(c.shutdown)
+
+	// Close all storage node connections
+	c.connMu.Lock()
+	for _, conn := range c.storageConns {
+		conn.Close()
+	}
+	c.storageConns = make(map[string]net.Conn)
+	c.connMu.Unlock()
 }
 
-func (c *Controller) handleConnection(conn net.Conn) {
-	defer conn.Close()
-
-	// Read message size (4 bytes)
+func (c *Controller) readMessage(conn net.Conn) (string, []byte, error) {
+	// Read message size
 	sizeBuf := make([]byte, 4)
 	if _, err := conn.Read(sizeBuf); err != nil {
-		log.Printf("Error reading message size: %v", err)
-		return
+		return "", nil, fmt.Errorf("error reading message size: %v", err)
 	}
 	size := binary.BigEndian.Uint32(sizeBuf)
 
 	// Read message
 	msgBuf := make([]byte, size)
 	if _, err := conn.Read(msgBuf); err != nil {
-		log.Printf("Error reading message: %v", err)
-		return
+		return "", nil, fmt.Errorf("error reading message: %v", err)
 	}
 
-	// Try to unmarshal as different message types
+	// Try to identify message type by attempting to unmarshal into each type
+	// and verifying the content is valid
+
+	// Try heartbeat first since it's most common
 	heartbeat := &pb.Heartbeat{}
-	if proto.Unmarshal(msgBuf, heartbeat) == nil {
-		c.handleHeartbeat(heartbeat)
-		return
+	if err := proto.Unmarshal(msgBuf, heartbeat); err == nil {
+		if heartbeat.NodeId != "" { // Verify it's a valid heartbeat
+			log.Printf("Controller: heartbeat from node %s", heartbeat.NodeId)
+			return "heartbeat", msgBuf, nil
+		}
 	}
+
+	// Try store request
 	storeReq := &pb.StoreRequest{}
-	if proto.Unmarshal(msgBuf, storeReq) == nil {
-		resp := c.handleStoreRequest(storeReq)
-		c.sendResponse(conn, resp)
-		return
+	if err := proto.Unmarshal(msgBuf, storeReq); err == nil {
+		if storeReq.Filename != "" && storeReq.NumChunks > 0 { // Verify it's a valid store request
+			log.Printf("Controller: store request for file %s", storeReq.Filename)
+			return "store", msgBuf, nil
+		}
 	}
+
+	// Try retrieve request
 	retrieveReq := &pb.RetrieveRequest{}
-	if proto.Unmarshal(msgBuf, retrieveReq) == nil {
-		resp := c.handleRetrieveRequest(retrieveReq)
-		c.sendResponse(conn, resp)
-		return
+	if err := proto.Unmarshal(msgBuf, retrieveReq); err == nil {
+		if retrieveReq.Filename != "" { // Verify it's a valid retrieve request
+			log.Printf("Controller: retrieve request for file %s", retrieveReq.Filename)
+			return "retrieve", msgBuf, nil
+		}
 	}
+
+	// Try delete request
 	deleteReq := &pb.DeleteRequest{}
-	if proto.Unmarshal(msgBuf, deleteReq) == nil {
-		resp := c.handleDeleteRequest(deleteReq)
-		c.sendResponse(conn, resp)
-		return
+	if err := proto.Unmarshal(msgBuf, deleteReq); err == nil {
+		if deleteReq.Filename != "" { // Verify it's a valid delete request
+			log.Printf("Controller: delete request for file %s", deleteReq.Filename)
+			return "delete", msgBuf, nil
+		}
 	}
+
+	// Try list request
 	listReq := &pb.ListRequest{}
-	if proto.Unmarshal(msgBuf, listReq) == nil {
-		resp := c.handleListRequest(listReq)
-		c.sendResponse(conn, resp)
-		return
+	if err := proto.Unmarshal(msgBuf, listReq); err == nil {
+		if listReq.ListRequest {
+			log.Printf("Controller: list request")
+			return "list", msgBuf, nil
+		}
 	}
+
+	// Try node status request
 	statusReq := &pb.NodeStatusRequest{}
-	if proto.Unmarshal(msgBuf, statusReq) == nil {
-		resp := c.handleNodeStatusRequest(statusReq)
-		c.sendResponse(conn, resp)
+	if err := proto.Unmarshal(msgBuf, statusReq); err == nil {
+		if statusReq.NodeStatus {
+			log.Printf("Controller: status request")
+			return "status", msgBuf, nil
+		}
+	}
+
+	log.Printf("Controller: unknown message type")
+	return "unknown", msgBuf, nil
+}
+
+func (c *Controller) handleStorageNodeConnection(conn net.Conn, initialMsg []byte) {
+	// Handle initial heartbeat
+	heartbeat := &pb.Heartbeat{}
+	if err := proto.Unmarshal(initialMsg, heartbeat); err != nil {
+		log.Printf("Error unmarshaling initial heartbeat: %v", err)
+		conn.Close()
 		return
 	}
 
-	log.Printf("Unknown message type received")
+	// Store the connection
+	c.connMu.Lock()
+	if oldConn, exists := c.storageConns[heartbeat.NodeId]; exists {
+		log.Printf("Closing old connection for node %s", heartbeat.NodeId)
+		oldConn.Close()
+	}
+	c.storageConns[heartbeat.NodeId] = conn
+	c.connMu.Unlock()
+
+	// Handle the heartbeat
+	if err := c.handleHeartbeat(heartbeat); err != nil {
+		log.Printf("Error handling initial heartbeat: %v", err)
+		conn.Close()
+		return
+	}
+
+	// Set TCP keepalive
+	tcpConn := conn.(*net.TCPConn)
+	if err := tcpConn.SetKeepAlive(true); err != nil {
+		log.Printf("Error setting keepalive: %v", err)
+	}
+	if err := tcpConn.SetKeepAlivePeriod(30 * time.Second); err != nil {
+		log.Printf("Error setting keepalive period: %v", err)
+	}
+
+	defer func() {
+		c.connMu.Lock()
+		delete(c.storageConns, heartbeat.NodeId)
+		c.connMu.Unlock()
+		conn.Close()
+	}()
+
+	// Continue reading heartbeats
+	for {
+		msgType, msgBuf, err := c.readMessage(conn)
+		if err != nil {
+			log.Printf("Error reading from storage node %s: %v", heartbeat.NodeId, err)
+			return
+		}
+
+		if msgType != "heartbeat" {
+			log.Printf("Unexpected message type from storage node: %s", msgType)
+			continue
+		}
+
+		heartbeat := &pb.Heartbeat{}
+		if err := proto.Unmarshal(msgBuf, heartbeat); err != nil {
+			log.Printf("Error unmarshaling heartbeat: %v", err)
+			continue
+		}
+
+		if err := c.handleHeartbeat(heartbeat); err != nil {
+			log.Printf("Error handling heartbeat: %v", err)
+			return
+		}
+	}
+}
+
+func (c *Controller) handleClientConnection(conn net.Conn, msgType string, msgBuf []byte) {
+	defer conn.Close()
+
+	var resp proto.Message
+	switch msgType {
+	case "store":
+		req := &pb.StoreRequest{}
+		proto.Unmarshal(msgBuf, req)
+		resp = c.handleStoreRequest(req)
+	case "retrieve":
+		req := &pb.RetrieveRequest{}
+		proto.Unmarshal(msgBuf, req)
+		resp = c.handleRetrieveRequest(req)
+	case "delete":
+		req := &pb.DeleteRequest{}
+		proto.Unmarshal(msgBuf, req)
+		resp = c.handleDeleteRequest(req)
+	case "list":
+		req := &pb.ListRequest{}
+		proto.Unmarshal(msgBuf, req)
+		resp = c.handleListRequest(req)
+	case "status":
+		req := &pb.NodeStatusRequest{}
+		proto.Unmarshal(msgBuf, req)
+		resp = c.handleNodeStatusRequest(req)
+	default:
+		log.Printf("Unknown message type from client: %s", msgType)
+		return
+	}
+
+	if resp != nil {
+		c.sendResponse(conn, resp)
+	}
 }
 
 func (c *Controller) sendResponse(conn net.Conn, msg proto.Message) {
@@ -322,6 +470,7 @@ func (c *Controller) handleNodeStatusRequest(req *pb.NodeStatusRequest) *pb.Node
 			FreeSpace:     node.freeSpace,
 			TotalRequests: node.totalRequests,
 		})
+		log.Printf("Controller: Node Info: %v", node.id)
 	}
 
 	return &pb.NodeStatusResponse{
