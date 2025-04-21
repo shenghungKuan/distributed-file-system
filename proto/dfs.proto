@@ -64,7 +64,9 @@ message DeleteResponse {
 }
 
 // List files request from client to controller
-message ListRequest {}
+message ListRequest {
+  bool list_request = 1;
+}
 
 // List files response from controller to client
 message ListResponse {
@@ -79,7 +81,9 @@ message FileInfo {
 }
 
 // Node status request from client to controller
-message NodeStatusRequest {}
+message NodeStatusRequest {
+  bool node_status = 1;
+}
 
 // Node status response from controller to client
 message NodeStatusResponse {
