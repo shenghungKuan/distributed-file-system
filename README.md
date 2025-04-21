@@ -53,13 +53,17 @@ A distributed file system (DFS) implementation in Go that supports parallel stor
    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
    ```
 
-4. Generate Protocol Buffer code:
+4. Set the path:
    ```bash
-   protoc --go_out=. --go_opt=paths=source_relative proto/dfs.proto
-   protoc -I=. --go_out=. ./proto/dfs.proto
+   PATH="$PATH:${GOPATH}/bin:${HOME}/go/bin"
    ```
 
-5. Build the binary for each:
+5. Generate Protocol Buffer code:
+   ```bash
+   protoc --go_out=. proto/dfs.proto
+   ```
+
+6. Build the binary for each:
    ```bash
    cd cmd/storage && go build -o ../../bin/storage  
    cd cmd/controller && go build -o ../../bin/controller  
