@@ -3,6 +3,30 @@ package dfs;
 
 option go_package = "./proto";
 
+// Wrapper message that can contain any type of DFS message
+message DFSMessage {
+  oneof message {
+    // Control messages
+    Heartbeat heartbeat = 1;
+    StoreRequest store_request = 2;
+    StoreResponse store_response = 3;
+    RetrieveRequest retrieve_request = 4;
+    RetrieveResponse retrieve_response = 5;
+    DeleteRequest delete_request = 6;
+    DeleteResponse delete_response = 7;
+    ListRequest list_request = 8;
+    ListResponse list_response = 9;
+    NodeStatusRequest node_status_request = 10;
+    NodeStatusResponse node_status_response = 11;
+    
+    // Storage node messages
+    ChunkStoreRequest chunk_store_request = 12;
+    ChunkStoreResponse chunk_store_response = 13;
+    ChunkRetrieveRequest chunk_retrieve_request = 14;
+    ChunkRetrieveResponse chunk_retrieve_response = 15;
+  }
+}
+
 // Heartbeat message sent from storage nodes to controller
 message Heartbeat {
   string node_id = 1;

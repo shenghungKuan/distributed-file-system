@@ -130,55 +130,41 @@ func (c *Controller) readMessage(conn net.Conn) (string, []byte, error) {
 	// Try to identify message type by attempting to unmarshal into each type
 	// and verifying the content is valid
 
-	// Try heartbeat first since it's most common
-	heartbeat := &pb.Heartbeat{}
-	if err := proto.Unmarshal(msgBuf, heartbeat); err == nil {
-		if heartbeat.NodeId != "" { // Verify it's a valid heartbeat
-			log.Printf("Controller: heartbeat from node %s", heartbeat.NodeId)
+	// Try to unmarshal as DFSMessage
+	msg := &pb.DFSMessage{}
+	if err := proto.Unmarshal(msgBuf, msg); err != nil {
+		return "unknown", msgBuf, fmt.Errorf("failed to unmarshal DFSMessage: %v", err)
+	}
+
+	// Determine message type from oneof field
+	switch x := msg.Message.(type) {
+	case *pb.DFSMessage_Heartbeat:
+		if x.Heartbeat.NodeId != "" {
+			log.Printf("Controller: heartbeat from node %s", x.Heartbeat.NodeId)
 			return "heartbeat", msgBuf, nil
 		}
-	}
-
-	// Try store request
-	storeReq := &pb.StoreRequest{}
-	if err := proto.Unmarshal(msgBuf, storeReq); err == nil {
-		if storeReq.Filename != "" && storeReq.NumChunks > 0 { // Verify it's a valid store request
-			log.Printf("Controller: store request for file %s", storeReq.Filename)
+	case *pb.DFSMessage_StoreRequest:
+		if x.StoreRequest.Filename != "" && x.StoreRequest.NumChunks > 0 {
+			log.Printf("Controller: store request for file %s", x.StoreRequest.Filename)
 			return "store", msgBuf, nil
 		}
-	}
-
-	// Try retrieve request
-	retrieveReq := &pb.RetrieveRequest{}
-	if err := proto.Unmarshal(msgBuf, retrieveReq); err == nil {
-		if retrieveReq.Filename != "" { // Verify it's a valid retrieve request
-			log.Printf("Controller: retrieve request for file %s", retrieveReq.Filename)
+	case *pb.DFSMessage_RetrieveRequest:
+		if x.RetrieveRequest.Filename != "" {
+			log.Printf("Controller: retrieve request for file %s", x.RetrieveRequest.Filename)
 			return "retrieve", msgBuf, nil
 		}
-	}
-
-	// Try delete request
-	deleteReq := &pb.DeleteRequest{}
-	if err := proto.Unmarshal(msgBuf, deleteReq); err == nil {
-		if deleteReq.Filename != "" { // Verify it's a valid delete request
-			log.Printf("Controller: delete request for file %s", deleteReq.Filename)
+	case *pb.DFSMessage_DeleteRequest:
+		if x.DeleteRequest.Filename != "" {
+			log.Printf("Controller: delete request for file %s", x.DeleteRequest.Filename)
 			return "delete", msgBuf, nil
 		}
-	}
-
-	// Try list request
-	listReq := &pb.ListRequest{}
-	if err := proto.Unmarshal(msgBuf, listReq); err == nil {
-		if listReq.ListRequest {
+	case *pb.DFSMessage_ListRequest:
+		if x.ListRequest.ListRequest {
 			log.Printf("Controller: list request")
 			return "list", msgBuf, nil
 		}
-	}
-
-	// Try node status request
-	statusReq := &pb.NodeStatusRequest{}
-	if err := proto.Unmarshal(msgBuf, statusReq); err == nil {
-		if statusReq.NodeStatus {
+	case *pb.DFSMessage_NodeStatusRequest:
+		if x.NodeStatusRequest.NodeStatus {
 			log.Printf("Controller: status request")
 			return "status", msgBuf, nil
 		}
@@ -190,8 +176,8 @@ func (c *Controller) readMessage(conn net.Conn) (string, []byte, error) {
 
 func (c *Controller) handleStorageNodeConnection(conn net.Conn, initialMsg []byte) {
 	// Handle initial heartbeat
-	heartbeat := &pb.Heartbeat{}
-	if err := proto.Unmarshal(initialMsg, heartbeat); err != nil {
+	msg := &pb.DFSMessage{}
+	if err := proto.Unmarshal(initialMsg, msg); err != nil {
 		log.Printf("Error unmarshaling initial heartbeat: %v", err)
 		conn.Close()
 		return
@@ -199,6 +185,13 @@ func (c *Controller) handleStorageNodeConnection(conn net.Conn, initialMsg []byt
 
 	// Store the connection
 	c.connMu.Lock()
+	if msg.GetHeartbeat() == nil {
+		log.Printf("Initial message is not a heartbeat")
+		conn.Close()
+		return
+	}
+	heartbeat := msg.GetHeartbeat()
+
 	if oldConn, exists := c.storageConns[heartbeat.NodeId]; exists {
 		log.Printf("Closing old connection for node %s", heartbeat.NodeId)
 		oldConn.Close()
@@ -242,13 +235,18 @@ func (c *Controller) handleStorageNodeConnection(conn net.Conn, initialMsg []byt
 			continue
 		}
 
-		heartbeat := &pb.Heartbeat{}
-		if err := proto.Unmarshal(msgBuf, heartbeat); err != nil {
+		msg := &pb.DFSMessage{}
+		if err := proto.Unmarshal(msgBuf, msg); err != nil {
 			log.Printf("Error unmarshaling heartbeat: %v", err)
 			continue
 		}
 
-		if err := c.handleHeartbeat(heartbeat); err != nil {
+		if msg.GetHeartbeat() == nil {
+			log.Printf("Message is not a heartbeat")
+			continue
+		}
+
+		if err := c.handleHeartbeat(msg.GetHeartbeat()); err != nil {
 			log.Printf("Error handling heartbeat: %v", err)
 			return
 		}
@@ -258,30 +256,26 @@ func (c *Controller) handleStorageNodeConnection(conn net.Conn, initialMsg []byt
 func (c *Controller) handleClientConnection(conn net.Conn, msgType string, msgBuf []byte) {
 	defer conn.Close()
 
-	var resp proto.Message
-	switch msgType {
-	case "store":
-		req := &pb.StoreRequest{}
-		proto.Unmarshal(msgBuf, req)
-		resp = c.handleStoreRequest(req)
-	case "retrieve":
-		req := &pb.RetrieveRequest{}
-		proto.Unmarshal(msgBuf, req)
-		resp = c.handleRetrieveRequest(req)
-	case "delete":
-		req := &pb.DeleteRequest{}
-		proto.Unmarshal(msgBuf, req)
-		resp = c.handleDeleteRequest(req)
-	case "list":
-		req := &pb.ListRequest{}
-		proto.Unmarshal(msgBuf, req)
-		resp = c.handleListRequest(req)
-	case "status":
-		req := &pb.NodeStatusRequest{}
-		proto.Unmarshal(msgBuf, req)
-		resp = c.handleNodeStatusRequest(req)
+	msg := &pb.DFSMessage{}
+	if err := proto.Unmarshal(msgBuf, msg); err != nil {
+		log.Printf("Error unmarshaling message: %v", err)
+		return
+	}
+
+	var resp *pb.DFSMessage
+	switch x := msg.Message.(type) {
+	case *pb.DFSMessage_StoreRequest:
+		resp = c.handleStoreRequest(x.StoreRequest)
+	case *pb.DFSMessage_RetrieveRequest:
+		resp = c.handleRetrieveRequest(x.RetrieveRequest)
+	case *pb.DFSMessage_DeleteRequest:
+		resp = c.handleDeleteRequest(x.DeleteRequest)
+	case *pb.DFSMessage_ListRequest:
+		resp = c.handleListRequest(x.ListRequest)
+	case *pb.DFSMessage_NodeStatusRequest:
+		resp = c.handleNodeStatusRequest(x.NodeStatusRequest)
 	default:
-		log.Printf("Unknown message type from client: %s", msgType)
+		log.Printf("Unknown message type from client")
 		return
 	}
 
@@ -336,15 +330,19 @@ func (c *Controller) handleHeartbeat(heartbeat *pb.Heartbeat) error {
 	return nil
 }
 
-func (c *Controller) handleStoreRequest(req *pb.StoreRequest) *pb.StoreResponse {
+func (c *Controller) handleStoreRequest(req *pb.StoreRequest) *pb.DFSMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Check if file already exists
 	if _, exists := c.files[req.Filename]; exists {
 		// Since StoreResponse doesn't have an error field, we just return empty placements
-		return &pb.StoreResponse{
-			ChunkPlacements: nil,
+		return &pb.DFSMessage{
+			Message: &pb.DFSMessage_StoreResponse{
+				StoreResponse: &pb.StoreResponse{
+					ChunkPlacements: nil,
+				},
+			},
 		}
 	}
 
@@ -352,8 +350,12 @@ func (c *Controller) handleStoreRequest(req *pb.StoreRequest) *pb.StoreResponse 
 	placements, err := c.selectStorageNodes(req.NumChunks, uint64(req.ChunkSize))
 	if err != nil {
 		// Since StoreResponse doesn't have an error field, we just return empty placements
-		return &pb.StoreResponse{
-			ChunkPlacements: nil,
+		return &pb.DFSMessage{
+			Message: &pb.DFSMessage_StoreResponse{
+				StoreResponse: &pb.StoreResponse{
+					ChunkPlacements: nil,
+				},
+			},
 		}
 	}
 
@@ -377,22 +379,30 @@ func (c *Controller) handleStoreRequest(req *pb.StoreRequest) *pb.StoreResponse 
 
 	c.files[req.Filename] = file
 
-	return &pb.StoreResponse{
-		ChunkPlacements: placements,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_StoreResponse{
+			StoreResponse: &pb.StoreResponse{
+				ChunkPlacements: placements,
+			},
+		},
 	}
 }
 
-func (c *Controller) handleRetrieveRequest(req *pb.RetrieveRequest) *pb.RetrieveResponse {
+func (c *Controller) handleRetrieveRequest(req *pb.RetrieveRequest) *pb.DFSMessage {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	file, exists := c.files[req.Filename]
 	if !exists {
 		// Since RetrieveResponse doesn't have an error field, we just return empty response
-		return &pb.RetrieveResponse{
-			ChunkPlacements: nil,
-			TotalSize:       0,
-			ChunkSize:       0,
+		return &pb.DFSMessage{
+			Message: &pb.DFSMessage_RetrieveResponse{
+				RetrieveResponse: &pb.RetrieveResponse{
+					ChunkPlacements: nil,
+					TotalSize:       0,
+					ChunkSize:       0,
+				},
+			},
 		}
 	}
 
@@ -406,20 +416,28 @@ func (c *Controller) handleRetrieveRequest(req *pb.RetrieveRequest) *pb.Retrieve
 		}
 	}
 
-	return &pb.RetrieveResponse{
-		ChunkPlacements: placements,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_RetrieveResponse{
+			RetrieveResponse: &pb.RetrieveResponse{
+				ChunkPlacements: placements,
+			},
+		},
 	}
 }
 
-func (c *Controller) handleDeleteRequest(req *pb.DeleteRequest) *pb.DeleteResponse {
+func (c *Controller) handleDeleteRequest(req *pb.DeleteRequest) *pb.DFSMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	file, exists := c.files[req.Filename]
 	if !exists {
-		return &pb.DeleteResponse{
-			Success: false,
-			Error:   fmt.Sprintf("file %s not found", req.Filename),
+		return &pb.DFSMessage{
+			Message: &pb.DFSMessage_DeleteResponse{
+				DeleteResponse: &pb.DeleteResponse{
+					Success: false,
+					Error:   fmt.Sprintf("file %s not found", req.Filename),
+				},
+			},
 		}
 	}
 
@@ -435,12 +453,16 @@ func (c *Controller) handleDeleteRequest(req *pb.DeleteRequest) *pb.DeleteRespon
 	// Remove file info
 	delete(c.files, req.Filename)
 
-	return &pb.DeleteResponse{
-		Success: true,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_DeleteResponse{
+			DeleteResponse: &pb.DeleteResponse{
+				Success: true,
+			},
+		},
 	}
 }
 
-func (c *Controller) handleListRequest(req *pb.ListRequest) *pb.ListResponse {
+func (c *Controller) handleListRequest(req *pb.ListRequest) *pb.DFSMessage {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -453,12 +475,16 @@ func (c *Controller) handleListRequest(req *pb.ListRequest) *pb.ListResponse {
 		})
 	}
 
-	return &pb.ListResponse{
-		Files: files,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_ListResponse{
+			ListResponse: &pb.ListResponse{
+				Files: files,
+			},
+		},
 	}
 }
 
-func (c *Controller) handleNodeStatusRequest(req *pb.NodeStatusRequest) *pb.NodeStatusResponse {
+func (c *Controller) handleNodeStatusRequest(req *pb.NodeStatusRequest) *pb.DFSMessage {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -473,8 +499,12 @@ func (c *Controller) handleNodeStatusRequest(req *pb.NodeStatusRequest) *pb.Node
 		log.Printf("Controller: Node Info: %v", node.id)
 	}
 
-	return &pb.NodeStatusResponse{
-		Nodes: nodes,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_NodeStatusResponse{
+			NodeStatusResponse: &pb.NodeStatusResponse{
+				Nodes: nodes,
+			},
+		},
 	}
 }
 

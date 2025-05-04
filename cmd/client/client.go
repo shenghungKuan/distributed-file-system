@@ -181,8 +181,12 @@ func (c *Client) DeleteFile(filename string) error {
 	defer conn.Close()
 
 	// Send delete request
-	req := &pb.DeleteRequest{
-		Filename: filename,
+	req := &pb.DFSMessage{
+		Message: &pb.DFSMessage_DeleteRequest{
+			DeleteRequest: &pb.DeleteRequest{
+				Filename: filename,
+			},
+		},
 	}
 
 	if err := c.sendMessage(conn, req); err != nil {
@@ -190,13 +194,17 @@ func (c *Client) DeleteFile(filename string) error {
 	}
 
 	// Receive response
-	resp := &pb.DeleteResponse{}
+	resp := &pb.DFSMessage{}
 	if err := c.receiveMessage(conn, resp); err != nil {
 		return fmt.Errorf("failed to receive delete response: %v", err)
 	}
 
-	if !resp.Success {
-		return fmt.Errorf("delete failed: %s", resp.Error)
+	deleteResp := resp.GetDeleteResponse()
+	if deleteResp == nil {
+		return fmt.Errorf("received unexpected response type")
+	}
+	if !deleteResp.Success {
+		return fmt.Errorf("delete failed: %s", deleteResp.Error)
 	}
 
 	return nil
@@ -210,22 +218,31 @@ func (c *Client) ListFiles() ([]FileInfo, error) {
 	defer conn.Close()
 
 	// Send list request
-	req := &pb.ListRequest{
-		ListRequest: true,
+	req := &pb.DFSMessage{
+		Message: &pb.DFSMessage_ListRequest{
+			ListRequest: &pb.ListRequest{
+				ListRequest: true,
+			},
+		},
 	}
 	if err := c.sendMessage(conn, req); err != nil {
 		return nil, fmt.Errorf("failed to send list request: %v", err)
 	}
 
 	// Receive response
-	resp := &pb.ListResponse{}
+	resp := &pb.DFSMessage{}
 	if err := c.receiveMessage(conn, resp); err != nil {
 		return nil, fmt.Errorf("failed to receive list response: %v", err)
 	}
 
 	// Convert to FileInfo slice
-	files := make([]FileInfo, len(resp.Files))
-	for i, f := range resp.Files {
+	listResp := resp.GetListResponse()
+	if listResp == nil {
+		return nil, fmt.Errorf("received unexpected response type")
+	}
+
+	files := make([]FileInfo, len(listResp.Files))
+	for i, f := range listResp.Files {
 		files[i] = FileInfo{
 			Name:      f.Filename,
 			Size:      f.Size,
@@ -244,22 +261,31 @@ func (c *Client) ListNodes() ([]NodeInfo, error) {
 	defer conn.Close()
 
 	// Send node status request
-	req := &pb.NodeStatusRequest{
-		NodeStatus: true,
+	req := &pb.DFSMessage{
+		Message: &pb.DFSMessage_NodeStatusRequest{
+			NodeStatusRequest: &pb.NodeStatusRequest{
+				NodeStatus: true,
+			},
+		},
 	}
 	if err := c.sendMessage(conn, req); err != nil {
 		return nil, fmt.Errorf("failed to send node status request: %v", err)
 	}
 
 	// Receive response
-	resp := &pb.NodeStatusResponse{}
+	resp := &pb.DFSMessage{}
 	if err := c.receiveMessage(conn, resp); err != nil {
 		return nil, fmt.Errorf("failed to receive node status response: %v", err)
 	}
 
 	// Convert to NodeInfo slice
-	nodes := make([]NodeInfo, len(resp.Nodes))
-	for i, n := range resp.Nodes {
+	statusResp := resp.GetNodeStatusResponse()
+	if statusResp == nil {
+		return nil, fmt.Errorf("received unexpected response type")
+	}
+
+	nodes := make([]NodeInfo, len(statusResp.Nodes))
+	for i, n := range statusResp.Nodes {
 		nodes[i] = NodeInfo{
 			ID:            n.NodeId,
 			Address:       n.Address,
@@ -325,11 +351,15 @@ func (c *Client) requestChunkPlacements(filename string, fileSize uint64, chunkS
 	defer conn.Close()
 
 	// Send store request
-	req := &pb.StoreRequest{
-		Filename:  filename,
-		TotalSize: fileSize,
-		ChunkSize: chunkSize,
-		NumChunks: numChunks,
+	req := &pb.DFSMessage{
+		Message: &pb.DFSMessage_StoreRequest{
+			StoreRequest: &pb.StoreRequest{
+				Filename:  filename,
+				TotalSize: fileSize,
+				ChunkSize: chunkSize,
+				NumChunks: numChunks,
+			},
+		},
 	}
 
 	if err := c.sendMessage(conn, req); err != nil {
@@ -337,12 +367,16 @@ func (c *Client) requestChunkPlacements(filename string, fileSize uint64, chunkS
 	}
 
 	// Receive response
-	resp := &pb.StoreResponse{}
+	resp := &pb.DFSMessage{}
 	if err := c.receiveMessage(conn, resp); err != nil {
 		return nil, fmt.Errorf("failed to receive store response: %v", err)
 	}
 
-	return resp.ChunkPlacements, nil
+	storeResp := resp.GetStoreResponse()
+	if storeResp == nil {
+		return nil, fmt.Errorf("received unexpected response type")
+	}
+	return storeResp.ChunkPlacements, nil
 }
 
 func (c *Client) requestFileRetrieval(filename string) (*pb.RetrieveResponse, error) {
@@ -353,8 +387,12 @@ func (c *Client) requestFileRetrieval(filename string) (*pb.RetrieveResponse, er
 	defer conn.Close()
 
 	// Send retrieve request
-	req := &pb.RetrieveRequest{
-		Filename: filename,
+	req := &pb.DFSMessage{
+		Message: &pb.DFSMessage_RetrieveRequest{
+			RetrieveRequest: &pb.RetrieveRequest{
+				Filename: filename,
+			},
+		},
 	}
 
 	if err := c.sendMessage(conn, req); err != nil {
@@ -362,12 +400,16 @@ func (c *Client) requestFileRetrieval(filename string) (*pb.RetrieveResponse, er
 	}
 
 	// Receive response
-	resp := &pb.RetrieveResponse{}
+	resp := &pb.DFSMessage{}
 	if err := c.receiveMessage(conn, resp); err != nil {
 		return nil, fmt.Errorf("failed to receive retrieve response: %v", err)
 	}
 
-	return resp, nil
+	retrieveResp := resp.GetRetrieveResponse()
+	if retrieveResp == nil {
+		return nil, fmt.Errorf("received unexpected response type")
+	}
+	return retrieveResp, nil
 }
 
 func (c *Client) storeChunk(placement *pb.ChunkPlacement, data []byte) error {
@@ -375,11 +417,15 @@ func (c *Client) storeChunk(placement *pb.ChunkPlacement, data []byte) error {
 	// checksum := sha256.Sum256(data)
 
 	// Create store request
-	req := &pb.ChunkStoreRequest{
-		ChunkId:      placement.ChunkId,
-		ChunkIndex:   placement.ChunkIndex,
-		Data:         data,
-		ReplicaNodes: placement.StorageNodes[1:], // Skip primary node
+	req := &pb.DFSMessage{
+		Message: &pb.DFSMessage_ChunkStoreRequest{
+			ChunkStoreRequest: &pb.ChunkStoreRequest{
+				ChunkId:      placement.ChunkId,
+				ChunkIndex:   placement.ChunkIndex,
+				Data:         data,
+				ReplicaNodes: placement.StorageNodes[1:], // Skip primary node
+			},
+		},
 	}
 
 	// Connect to primary storage node
@@ -395,13 +441,17 @@ func (c *Client) storeChunk(placement *pb.ChunkPlacement, data []byte) error {
 	}
 
 	// Receive response
-	resp := &pb.ChunkStoreResponse{}
+	resp := &pb.DFSMessage{}
 	if err := c.receiveMessage(conn, resp); err != nil {
 		return fmt.Errorf("failed to receive chunk store response: %v", err)
 	}
 
-	if !resp.Success {
-		return fmt.Errorf("chunk store failed: %s", resp.Error)
+	storeResp := resp.GetChunkStoreResponse()
+	if storeResp == nil {
+		return fmt.Errorf("received unexpected response type")
+	}
+	if !storeResp.Success {
+		return fmt.Errorf("chunk store failed: %s", storeResp.Error)
 	}
 
 	return nil
@@ -416,8 +466,12 @@ func (c *Client) retrieveChunk(nodeAddr, chunkID string) ([]byte, []byte, error)
 	defer conn.Close()
 
 	// Send retrieve request
-	req := &pb.ChunkRetrieveRequest{
-		ChunkId: chunkID,
+	req := &pb.DFSMessage{
+		Message: &pb.DFSMessage_ChunkRetrieveRequest{
+			ChunkRetrieveRequest: &pb.ChunkRetrieveRequest{
+				ChunkId: chunkID,
+			},
+		},
 	}
 
 	if err := c.sendMessage(conn, req); err != nil {
@@ -425,14 +479,19 @@ func (c *Client) retrieveChunk(nodeAddr, chunkID string) ([]byte, []byte, error)
 	}
 
 	// Receive response
-	resp := &pb.ChunkRetrieveResponse{}
+	resp := &pb.DFSMessage{}
 	if err := c.receiveMessage(conn, resp); err != nil {
 		return nil, nil, fmt.Errorf("failed to receive chunk retrieve response: %v", err)
 	}
 
-	if resp.Corrupted {
-		return resp.Data, resp.Checksum, fmt.Errorf("chunk is corrupted")
+	retrieveResp := resp.GetChunkRetrieveResponse()
+	if retrieveResp == nil {
+		return nil, nil, fmt.Errorf("received unexpected response type")
 	}
 
-	return resp.Data, resp.Checksum, nil
+	if retrieveResp.Corrupted {
+		return retrieveResp.Data, retrieveResp.Checksum, fmt.Errorf("chunk is corrupted")
+	}
+
+	return retrieveResp.Data, retrieveResp.Checksum, nil
 }

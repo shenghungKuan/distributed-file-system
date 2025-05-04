@@ -150,14 +150,18 @@ func (s *StorageNode) sendHeartbeat() error {
 		return fmt.Errorf("no connection to controller")
 	}
 
-	heartbeat := &pb.Heartbeat{
-		NodeId:        s.nodeID,
-		Address:       fmt.Sprintf(":%d", s.port),
-		FreeSpace:     s.getFreeSpace(),
-		TotalRequests: s.totalRequests,
+	msg := &pb.DFSMessage{
+		Message: &pb.DFSMessage_Heartbeat{
+			Heartbeat: &pb.Heartbeat{
+				NodeId:        s.nodeID,
+				Address:       fmt.Sprintf(":%d", s.port),
+				FreeSpace:     s.getFreeSpace(),
+				TotalRequests: s.totalRequests,
+			},
+		},
 	}
 
-	msgBytes, err := proto.Marshal(heartbeat)
+	msgBytes, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal heartbeat: %v", err)
 	}
@@ -241,29 +245,27 @@ func (s *StorageNode) handleConnection(conn net.Conn) {
 	s.totalRequests++
 	s.mu.Unlock()
 
-	// Try to unmarshal as different message types
-	storeReq := &pb.ChunkStoreRequest{}
-	if proto.Unmarshal(msgBuf, storeReq) == nil {
-		resp := s.handleChunkStore(storeReq)
-		s.sendResponse(conn, resp)
+	// Unmarshal as DFSMessage
+	msg := &pb.DFSMessage{}
+	if err := proto.Unmarshal(msgBuf, msg); err != nil {
+		log.Printf("Failed to unmarshal message: %v", err)
 		return
 	}
 
-	retrieveReq := &pb.ChunkRetrieveRequest{}
-	if proto.Unmarshal(msgBuf, retrieveReq) == nil {
-		resp := s.handleChunkRetrieve(retrieveReq)
-		s.sendResponse(conn, resp)
+	var resp *pb.DFSMessage
+	switch x := msg.Message.(type) {
+	case *pb.DFSMessage_ChunkStoreRequest:
+		resp = s.handleChunkStore(x.ChunkStoreRequest)
+	case *pb.DFSMessage_ChunkRetrieveRequest:
+		resp = s.handleChunkRetrieve(x.ChunkRetrieveRequest)
+	case *pb.DFSMessage_DeleteRequest:
+		resp = s.handleChunkDelete(x.DeleteRequest)
+	default:
+		log.Printf("Unknown message type received")
 		return
 	}
 
-	deleteReq := &pb.DeleteRequest{}
-	if proto.Unmarshal(msgBuf, deleteReq) == nil {
-		resp := s.handleChunkDelete(deleteReq)
-		s.sendResponse(conn, resp)
-		return
-	}
-
-	log.Printf("Unknown message type received")
+	s.sendResponse(conn, resp)
 }
 
 func (s *StorageNode) sendResponse(conn net.Conn, msg proto.Message) {
@@ -288,12 +290,16 @@ func (s *StorageNode) sendResponse(conn net.Conn, msg proto.Message) {
 	}
 }
 
-func (s *StorageNode) handleChunkStore(req *pb.ChunkStoreRequest) *pb.ChunkStoreResponse {
+func (s *StorageNode) handleChunkStore(req *pb.ChunkStoreRequest) *pb.DFSMessage {
 	// Store the chunk locally
 	if err := s.storeChunk(req.ChunkId, req.Data); err != nil {
-		return &pb.ChunkStoreResponse{
-			Success: false,
-			Error:   err.Error(),
+		return &pb.DFSMessage{
+			Message: &pb.DFSMessage_ChunkStoreResponse{
+				ChunkStoreResponse: &pb.ChunkStoreResponse{
+					Success: false,
+					Error:   err.Error(),
+				},
+			},
 		}
 	}
 
@@ -304,40 +310,60 @@ func (s *StorageNode) handleChunkStore(req *pb.ChunkStoreRequest) *pb.ChunkStore
 		}
 	}
 
-	return &pb.ChunkStoreResponse{
-		Success: true,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_ChunkStoreResponse{
+			ChunkStoreResponse: &pb.ChunkStoreResponse{
+				Success: true,
+			},
+		},
 	}
 }
 
-func (s *StorageNode) handleChunkRetrieve(req *pb.ChunkRetrieveRequest) *pb.ChunkRetrieveResponse {
+func (s *StorageNode) handleChunkRetrieve(req *pb.ChunkRetrieveRequest) *pb.DFSMessage {
 	data, checksum, err := s.retrieveChunk(req.ChunkId)
 	if err != nil {
 		// Since ChunkRetrieveResponse doesn't have an error field,
 		// we just return corrupted data
-		return &pb.ChunkRetrieveResponse{
-			Corrupted: true,
+		return &pb.DFSMessage{
+			Message: &pb.DFSMessage_ChunkRetrieveResponse{
+				ChunkRetrieveResponse: &pb.ChunkRetrieveResponse{
+					Corrupted: true,
+				},
+			},
 		}
 	}
 
-	return &pb.ChunkRetrieveResponse{
-		Data:      data,
-		Checksum:  checksum,
-		Corrupted: false,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_ChunkRetrieveResponse{
+			ChunkRetrieveResponse: &pb.ChunkRetrieveResponse{
+				Data:      data,
+				Checksum:  checksum,
+				Corrupted: false,
+			},
+		},
 	}
 }
 
-func (s *StorageNode) handleChunkDelete(req *pb.DeleteRequest) *pb.DeleteResponse {
+func (s *StorageNode) handleChunkDelete(req *pb.DeleteRequest) *pb.DFSMessage {
 	// For delete requests, the filename is the chunk ID
 	path := filepath.Join(s.storageDir, req.Filename)
 	if err := os.Remove(path); err != nil {
-		return &pb.DeleteResponse{
-			Success: false,
-			Error:   err.Error(),
+		return &pb.DFSMessage{
+			Message: &pb.DFSMessage_DeleteResponse{
+				DeleteResponse: &pb.DeleteResponse{
+					Success: false,
+					Error:   err.Error(),
+				},
+			},
 		}
 	}
 
-	return &pb.DeleteResponse{
-		Success: true,
+	return &pb.DFSMessage{
+		Message: &pb.DFSMessage_DeleteResponse{
+			DeleteResponse: &pb.DeleteResponse{
+				Success: true,
+			},
+		},
 	}
 }
 
@@ -350,11 +376,15 @@ func (s *StorageNode) forwardChunk(nodeAddr string, req *pb.ChunkStoreRequest) e
 		}
 	}
 
-	forwardReq := &pb.ChunkStoreRequest{
-		ChunkId:      req.ChunkId,
-		ChunkIndex:   req.ChunkIndex,
-		Data:         req.Data,
-		ReplicaNodes: replicaNodes,
+	forwardReq := &pb.DFSMessage{
+		Message: &pb.DFSMessage_ChunkStoreRequest{
+			ChunkStoreRequest: &pb.ChunkStoreRequest{
+				ChunkId:      req.ChunkId,
+				ChunkIndex:   req.ChunkIndex,
+				Data:         req.Data,
+				ReplicaNodes: replicaNodes,
+			},
+		},
 	}
 
 	// Connect to replica node
@@ -383,13 +413,18 @@ func (s *StorageNode) forwardChunk(nodeAddr string, req *pb.ChunkStoreRequest) e
 	}
 
 	// Read response
-	resp := &pb.ChunkStoreResponse{}
+	resp := &pb.DFSMessage{}
 	if err := s.receiveMessage(conn, resp); err != nil {
 		return fmt.Errorf("failed to receive forward response: %v", err)
 	}
 
-	if !resp.Success {
-		return fmt.Errorf("forward failed: %s", resp.Error)
+	switch x := resp.Message.(type) {
+	case *pb.DFSMessage_ChunkStoreResponse:
+		if !x.ChunkStoreResponse.Success {
+			return fmt.Errorf("forward failed: %s", x.ChunkStoreResponse.Error)
+		}
+	default:
+		return fmt.Errorf("unexpected response type")
 	}
 
 	return nil
