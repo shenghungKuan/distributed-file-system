@@ -65,9 +65,7 @@ A distributed file system (DFS) implementation in Go that supports parallel stor
 
 6. Build the binary for each:
    ```bash
-   cd cmd/storage && go build -o ../../bin/storage  
-   cd cmd/controller && go build -o ../../bin/controller  
-   cd cmd/client && go build -o ../../bin/client  
+   sh build.sh
    ```
 
 ## Running
