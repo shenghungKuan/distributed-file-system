@@ -95,7 +95,7 @@ A distributed file system (DFS) implementation in Go that supports parallel stor
 ## Client Commands
 
 - `store <local_file> [chunk_size_mb]` - Store a file with optional chunk size in MB (default: 64MB)
-- `retrieve <filename> <local_path>` - Retrieve a file
+- `retrieve <filename> <local_path>` - Retrieve a file <filename> from nodes and store it into <local_path>
 - `delete <filename>` - Delete a file
 - `list` - List all stored files
 - `nodes` - List active storage nodes
