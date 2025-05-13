@@ -25,6 +25,7 @@ type StorageNode struct {
 	port           int
 	storageDir     string
 	nodeID         string
+	hostAddr       string // Add host address field
 
 	listener       net.Listener
 	controllerConn net.Conn
@@ -41,11 +42,24 @@ func NewStorageNode(controllerAddr string, port int, storageDir string) (*Storag
 		return nil, fmt.Errorf("failed to create storage directory: %v", err)
 	}
 
+	// Get host address that other nodes can connect to
+	hostAddr := "localhost" // Default to localhost
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+				hostAddr = ipnet.IP.String()
+				break
+			}
+		}
+	}
+
 	return &StorageNode{
 		controllerAddr: controllerAddr,
 		port:           port,
 		storageDir:     storageDir,
 		nodeID:         uuid.New().String(),
+		hostAddr:       hostAddr,
 		shutdown:       make(chan struct{}),
 	}, nil
 }
@@ -154,7 +168,7 @@ func (s *StorageNode) sendHeartbeat() error {
 		Message: &pb.DFSMessage_Heartbeat{
 			Heartbeat: &pb.Heartbeat{
 				NodeId:        s.nodeID,
-				Address:       fmt.Sprintf(":%d", s.port),
+				Address:       fmt.Sprintf("%s:%d", s.hostAddr, s.port),
 				FreeSpace:     s.getFreeSpace(),
 				TotalRequests: s.totalRequests,
 			},

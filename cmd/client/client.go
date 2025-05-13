@@ -38,6 +38,16 @@ func NewClient(controllerAddr string) (*Client, error) {
 }
 
 func (c *Client) StoreFile(localPath string, chunkSizeMB uint32) error {
+	// Check for active storage nodes first
+	nodes, err := c.ListNodes()
+	if err != nil {
+		return fmt.Errorf("failed to check storage nodes: %v", err)
+	}
+	if len(nodes) < 3 {
+		return fmt.Errorf("not enough storage nodes available (have %d, need at least 3). Use 'nodes' command to check active nodes", len(nodes))
+	}
+	fmt.Printf("Found %d active storage nodes\n", len(nodes))
+
 	file, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %v", err)
@@ -54,10 +64,22 @@ func (c *Client) StoreFile(localPath string, chunkSizeMB uint32) error {
 	numChunks := uint32((fileInfo.Size() + int64(chunkSize) - 1) / int64(chunkSize))
 
 	// Request chunk placements from controller
+	fmt.Printf("Requesting chunk placements for file %s with %d chunks of size %d\n",
+		filepath.Base(localPath), numChunks, chunkSize)
 	placements, err := c.requestChunkPlacements(filepath.Base(localPath), uint64(fileInfo.Size()), chunkSize, numChunks)
 	if err != nil {
 		return fmt.Errorf("failed to get chunk placements: %v", err)
 	}
+
+	// Validate placements
+	if len(placements) == 0 {
+		return fmt.Errorf("no storage nodes available (minimum 3 nodes required)")
+	}
+	if len(placements) != int(numChunks) {
+		return fmt.Errorf("received incorrect number of chunk placements (got %d, expected %d)",
+			len(placements), numChunks)
+	}
+	fmt.Printf("Received %d chunk placements\n", len(placements))
 
 	// Store chunks in parallel
 	var wg sync.WaitGroup
@@ -83,6 +105,12 @@ func (c *Client) StoreFile(localPath string, chunkSizeMB uint32) error {
 			}
 
 			// Store chunk
+			fmt.Printf("Processing chunk %d/%d\n", chunkIndex+1, numChunks)
+			if chunkIndex >= uint32(len(placements)) {
+				errors <- fmt.Errorf("chunk index %d out of range for placements slice of length %d",
+					chunkIndex, len(placements))
+				return
+			}
 			placement := placements[chunkIndex]
 			if err := c.storeChunk(placement, data); err != nil {
 				errors <- fmt.Errorf("failed to store chunk %d: %v", chunkIndex, err)

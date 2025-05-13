@@ -369,6 +369,7 @@ func (c *Controller) handleStoreRequest(req *pb.StoreRequest) *pb.DFSMessage {
 
 	// Initialize chunk info
 	for i, placement := range placements {
+		log.Printf("Storing chunk %d of file %s on nodes: %v", i, req.Filename, placement.StorageNodes)
 		file.chunks[i] = &chunkInfo{
 			id:    placement.ChunkId,
 			index: uint32(i),
@@ -605,7 +606,7 @@ func (c *Controller) selectStorageNodes(numChunks uint32, chunkSize uint64) ([]*
 					bestScore = score
 				}
 			}
-			selectedNodes = append(selectedNodes, bestNode)
+			selectedNodes = append(selectedNodes, c.nodes[bestNode].address)
 			delete(nodeScores, bestNode)
 		}
 

@@ -13,6 +13,7 @@ import (
 func main() {
 	// Parse command line flags
 	port := flag.Int("port", 8080, "Port to listen on")
+	host := flag.String("host", "0.0.0.0", "Host address to bind to")
 	flag.Parse()
 
 	// Create and start controller
@@ -22,13 +23,13 @@ func main() {
 	}
 
 	// Start listening for connections
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", *host, *port))
 	if err != nil {
 		log.Fatalf("Failed to start listener: %v", err)
 	}
 	defer listener.Close()
 
-	log.Printf("Controller listening on port %d", *port)
+	log.Printf("Controller listening on %s:%d", *host, *port)
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
